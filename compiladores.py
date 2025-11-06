@@ -7,439 +7,495 @@ Original file is located at
     https://colab.research.google.com/drive/1ZKdb19TcJjKqQE0i4WVVWgtrx9Nm1N8n
 """
 
-# trafficlang_compiler.py
-# Compilador TrafficLang - Unidade II
-# Inclui: Lexer, Parser simplificado, SemanticAnalyzer, CodeGenerator e Simulator
-# Atualizado para ignorar comentários iniciados por '#'
+# trafficlang_compiler_full.py
+# Compilador TrafficLang - Unidade II (completo: Lexer, Parser, SemanticAnalyzer, CodeGen, Simulator)
+# Exemplos baseados no PDF do projeto (grammar tokens e exemplos). Ver: Compiladores Projeto.pdf
+# (Exemplos: sem_quadra abrir; prioridade alta rota_emergencial fluxo > 10; if emergencia == True then sem_hospital intermitente end)
+#
+# Autor: gerado por assistente (base do usuário)
+# Uso: python trafficlang_compiler_full.py
 
 from enum import Enum, auto
-import json
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
+from typing import List, Optional, Any, Dict
+import json
+import re
 
-
-# =========================================================
-# TOKENS / LEXER
-# =========================================================
+# =========================
+# TOKEN / LEXER
+# =========================
 class TokenType(Enum):
-    IDENTIFIER = auto()
+    IDENT = auto()
     NUMBER = auto()
-    STRING = auto()
+    BOOLEAN = auto()
     KEYWORD = auto()
-    OPERATOR = auto()
-    ASSIGN = auto()
+    OP = auto()
     SEMICOLON = auto()
-    LPAREN = auto()
-    RPAREN = auto()
     LBRACE = auto()
     RBRACE = auto()
+    LPAREN = auto()
+    RPAREN = auto()
     EOF = auto()
 
-
+@dataclass
 class Token:
-    def __init__(self, token_type: TokenType, value: str, line: int, column: int):
-        self.type = token_type
-        self.value = value
-        self.line = line
-        self.column = column
+    type: TokenType
+    value: str
+    line: int
+    col: int
 
     def __repr__(self):
-        return f"Token({self.type.name}, '{self.value}', L{self.line}:C{self.column})"
-
+        return f"Token({self.type.name}, '{self.value}', L{self.line}:C{self.col})"
 
 class Lexer:
-    def __init__(self, source_code: str):
-        self.source = source_code
-        self.position = 0
+    def __init__(self, src: str):
+        self.src = src
+        self.i = 0
         self.line = 1
-        self.column = 0
-        self.keywords = {"sensor", "semaforo", "rota", "veiculo", "if", "else", "then", "end", "true", "false"}
+        self.col = 0
 
-    def next_char(self) -> Optional[str]:
-        if self.position >= len(self.source):
-            return None
-        ch = self.source[self.position]
-        self.position += 1
-        if ch == '\n':
-            self.line += 1
-            self.column = 0
-        else:
-            self.column += 1
-        return ch
+        # Tokens / vocabulary derived from PDF grammar
+        self.semaforo_ids = {"sem_quadra", "sem_av_principal", "sem_hospital"}
+        self.actions = {"abrir", "fechar", "intermitente"}
+        self.rotas = {"rota_emergencial", "rota_escolar", "rota_publica"}
+        self.sensors = {"fluxo", "acidente", "emergencia"}
+        self.priorities = {"alta", "media", "baixa"}
+        self.keywords = {"if", "then", "end", "AND", "OR"} | self.actions | self.rotas | self.priorities
+        self.boolean_literals = {"true", "false", "True", "False", "TRUE", "FALSE"}
 
     def peek(self) -> Optional[str]:
-        return self.source[self.position] if self.position < len(self.source) else None
+        return self.src[self.i] if self.i < len(self.src) else None
+
+    def next(self) -> Optional[str]:
+        ch = self.peek()
+        if ch is None:
+            return None
+        self.i += 1
+        if ch == '\n':
+            self.line += 1
+            self.col = 0
+        else:
+            self.col += 1
+        return ch
+
+    def skip_whitespace_and_comments(self):
+        while True:
+            ch = self.peek()
+            if ch is None:
+                return
+            if ch in ' \t\r\n':
+                self.next()
+                continue
+            # comment starting with '#' until end of line
+            if ch == '#':
+                while self.peek() not in (None, '\n'):
+                    self.next()
+                continue
+            break
+
+    def collect_while(self, predicate):
+        s = ''
+        while True:
+            ch = self.peek()
+            if ch is None or not predicate(ch):
+                break
+            s += self.next()
+        return s
 
     def tokenize(self) -> List[Token]:
         tokens: List[Token] = []
         while True:
-            ch = self.next_char()
+            self.skip_whitespace_and_comments()
+            ch = self.peek()
             if ch is None:
-                tokens.append(Token(TokenType.EOF, "", self.line, self.column))
+                tokens.append(Token(TokenType.EOF, "", self.line, self.col))
                 break
 
-            # Ignorar espaços e tabulações
-            if ch in " \t\r":
-                continue
-
-            # Ignorar comentários (# até o fim da linha)
-            if ch == "#":
-                while self.peek() not in (None, "\n"):
-                    self.next_char()
-                continue
-
-            # Ignorar quebras de linha
-            if ch == "\n":
-                continue
-
-            # Identificadores e palavras-chave
+            start_col = self.col + 1
+            # identifiers/keywords/booleans
             if ch.isalpha() or ch == '_':
-                start_col = self.column
-                ident = ch
-                while self.peek() and (self.peek().isalnum() or self.peek() == '_'):
-                    ident += self.next_char()
-                token_type = TokenType.KEYWORD if ident in self.keywords else TokenType.IDENTIFIER
-                tokens.append(Token(token_type, ident, self.line, start_col))
+                txt = self.collect_while(lambda c: c.isalnum() or c == '_' )
+                # normalize booleans
+                if txt in self.boolean_literals:
+                    tok = Token(TokenType.BOOLEAN, txt.lower(), self.line, start_col)
+                elif txt in self.keywords:
+                    tok = Token(TokenType.KEYWORD, txt, self.line, start_col)
+                else:
+                    tok = Token(TokenType.IDENT, txt, self.line, start_col)
+                tokens.append(tok)
                 continue
 
-            # Números
+            # numbers (integers or floats)
             if ch.isdigit():
-                start_col = self.column
-                num = ch
-                while self.peek() and self.peek().isdigit():
-                    num += self.next_char()
+                num = self.collect_while(lambda c: c.isdigit() or c == '.')
                 tokens.append(Token(TokenType.NUMBER, num, self.line, start_col))
                 continue
 
-            # Strings
-            if ch == '"':
-                start_col = self.column
-                s = ""
-                while self.peek() and self.peek() != '"':
-                    s += self.next_char()
-                if self.peek() == '"':
-                    self.next_char()
-                tokens.append(Token(TokenType.STRING, s, self.line, start_col))
-                continue
-
-            # Atribuição
-            if ch == '=':
-                tokens.append(Token(TokenType.ASSIGN, ch, self.line, self.column))
-                continue
-
-            # Pontuação e operadores
-            if ch == ';':
-                tokens.append(Token(TokenType.SEMICOLON, ch, self.line, self.column))
-                continue
-
-            if ch in "{}()":
-                mapping = {'{': TokenType.LBRACE, '}': TokenType.RBRACE, '(': TokenType.LPAREN, ')': TokenType.RPAREN}
-                tokens.append(Token(mapping[ch], ch, self.line, self.column))
-                continue
-
-            if ch in "<>!":
-                start_col = self.column
-                nxt = self.peek()
-                op = ch
-                if nxt == '=':
-                    op += self.next_char()
-                tokens.append(Token(TokenType.OPERATOR, op, self.line, start_col))
+            # operators (==, >, <, >=, <=, !=, + - * /)
+            if ch in "=!><":
+                s = self.next()
+                if self.peek() == '=':
+                    s += self.next()
+                tokens.append(Token(TokenType.OP, s, self.line, start_col))
                 continue
 
             if ch in "+-*/":
-                tokens.append(Token(TokenType.OPERATOR, ch, self.line, self.column))
+                tokens.append(Token(TokenType.OP, self.next(), self.line, start_col))
                 continue
 
-            # Qualquer outro caractere
-            tokens.append(Token(TokenType.OPERATOR, ch, self.line, self.column))
+            if ch == ';':
+                self.next()
+                tokens.append(Token(TokenType.SEMICOLON, ';', self.line, start_col))
+                continue
 
+            if ch in "{}()":
+                c = self.next()
+                mapping = {'{': TokenType.LBRACE, '}': TokenType.RBRACE, '(': TokenType.LPAREN, ')': TokenType.RPAREN}
+                tokens.append(Token(mapping[c], c, self.line, start_col))
+                continue
+
+            # strings (not heavily used in this DSL, but support)
+            if ch == '"':
+                self.next()
+                s = ''
+                while self.peek() is not None and self.peek() != '"':
+                    s += self.next()
+                if self.peek() == '"':
+                    self.next()
+                tokens.append(Token(TokenType.IDENT, s, self.line, start_col))
+                continue
+
+            # unknown single char -> operator token
+            tokens.append(Token(TokenType.OP, self.next(), self.line, start_col))
         return tokens
 
+# =========================
+# PARSER (descida recursiva simplificado)
+# =========================
+class ParseError(Exception):
+    pass
 
-# =========================================================
-# PARSER SIMPLIFICADO
-# =========================================================
+@dataclass
+class ASTNode:
+    nodetype: str
+    value: Any
+
 class Parser:
     def __init__(self, tokens: List[Token]):
         self.tokens = tokens
         self.pos = 0
 
+        # grammar vocabulary (same as lexer)
+        self.semaforo_ids = {"sem_quadra", "sem_av_principal", "sem_hospital"}
+        self.actions = {"abrir", "fechar", "intermitente"}
+        self.rotas = {"rota_emergencial", "rota_escolar", "rota_publica"}
+        self.priorities = {"alta", "media", "baixa"}
+        self.sensors = {"fluxo", "acidente", "emergencia"}
+
     def peek(self) -> Token:
-        """Olha o próximo token sem consumir."""
         if self.pos < len(self.tokens):
             return self.tokens[self.pos]
         return Token(TokenType.EOF, "", -1, -1)
 
     def next(self) -> Token:
-        """Retorna o token atual e avança."""
-        if self.pos < len(self.tokens):
-            tok = self.tokens[self.pos]
-            self.pos += 1
-            return tok
-        return Token(TokenType.EOF, "", -1, -1)
+        t = self.peek()
+        self.pos += 1
+        return t
 
-    def parse(self) -> List[Dict[str, Any]]:
-        """Cria a AST a partir da lista de tokens."""
-        ast_nodes = []
-        while True:
-            tok = self.peek()
+    def expect(self, ttype: TokenType, values: Optional[set] = None):
+        tok = self.peek()
+        if tok.type != ttype or (values is not None and tok.value not in values):
+            raise ParseError(f"Esperado {ttype.name} {values if values else ''}, encontrado {tok}")
+        return self.next()
 
-            # Fim do código
-            if tok.type == TokenType.EOF:
-                break
-
-            # ----------------------------------------------------
-            # DECLARAÇÕES
-            # Ex: sensor s1;
-            # ----------------------------------------------------
-            if tok.type == TokenType.KEYWORD and tok.value in ("sensor", "semaforo", "rota", "veiculo"):
-                typ = self.next().value
-                name_tok = self.next()
-
-                # Confere se o próximo é ponto e vírgula
-                semicolon = self.next()
-                if semicolon.type != TokenType.SEMICOLON:
-                    raise Exception(f"Erro de parsing: ';' esperado em L{semicolon.line}:C{semicolon.column}")
-
-                ast_nodes.append({
-                    "type": "declaration",
-                    "name": name_tok.value,
-                    "symbol_type": typ
-                })
-                continue
-
-            # ----------------------------------------------------
-            # ATRIBUIÇÕES
-            # Ex: s1 = 5;
-            # ----------------------------------------------------
-            if tok.type == TokenType.IDENTIFIER:
-                name_tok = self.next()
-                next_tok = self.peek()
-
-                # Se não houver '=', apenas ignora a linha (tolerância)
-                if next_tok.type != TokenType.ASSIGN:
-                    # Ignorar até o ponto e vírgula
-                    while self.peek().type not in (TokenType.SEMICOLON, TokenType.EOF):
-                        self.next()
-                    if self.peek().type == TokenType.SEMICOLON:
-                        self.next()
-                    continue
-
-                # Consome '='
+    def parse_program(self) -> List[ASTNode]:
+        stmts = []
+        while self.peek().type != TokenType.EOF:
+            # allow optional semicolons/newlines; we treat semicolon as separator
+            if self.peek().type == TokenType.SEMICOLON:
                 self.next()
-                val_tok = self.next()
-                val = val_tok.value
-
-                # Confere ';'
-                term = self.next()
-                if term.type != TokenType.SEMICOLON:
-                    raise Exception(f"Erro de parsing: ';' esperado em L{term.line}:C{term.column}")
-
-                ast_nodes.append({
-                    "type": "assignment",
-                    "name": name_tok.value,
-                    "value": val
-                })
                 continue
+            stmt = self.parse_statement()
+            if stmt:
+                stmts.append(stmt)
+            # optional semicolon after a statement
+            if self.peek().type == TokenType.SEMICOLON:
+                self.next()
+        return stmts
 
-            # ----------------------------------------------------
-            # CONDIÇÕES SIMPLIFICADAS
-            # Ex:
-            # if sensA > 10 then
-            #   R1 = 1;
-            # end
-            # ----------------------------------------------------
-            if tok.type == TokenType.KEYWORD and tok.value == "if":
-                if_tok = self.next()
-                left_tok = self.next()
-                op_tok = self.next()
-                right_tok = self.next()
-                then_tok = self.next()
+    def parse_statement(self) -> Optional[ASTNode]:
+        tok = self.peek()
+        # form 1: semaforo_id action
+        if tok.type in (TokenType.IDENT, TokenType.KEYWORD) and tok.value in self.semaforo_ids:
+            sem = self.next().value
+            # next token must be action
+            nxt = self.peek()
+            if nxt.value in self.actions:
+                act = self.next().value
+                return ASTNode("semaforo_action", {"semaforo": sem, "action": act})
+            else:
+                raise ParseError(f"Esperado ação para semáforo em {nxt}")
 
-                if then_tok.value != "then":
-                    raise Exception(f"Erro de parsing: 'then' esperado em L{then_tok.line}")
+        # form 2: prioridade rota condition
+        if tok.type in (TokenType.IDENT, TokenType.KEYWORD) and tok.value in self.priorities:
+            pr = self.next().value
+            rtoken = self.peek()
+            if rtoken.value in self.rotas:
+                rota = self.next().value
+                cond = self.parse_condition()
+                return ASTNode("route_priority", {"priority": pr, "rota": rota, "condition": cond})
+            else:
+                raise ParseError(f"Esperado rota após prioridade, encontrado {rtoken}")
 
-                # Ação dentro do if
-                act_name = self.next()
-                assign_tok = self.next()
-                if assign_tok.type != TokenType.ASSIGN:
-                    raise Exception(f"Erro de parsing: '=' esperado em L{assign_tok.line}:C{assign_tok.column}")
-
-                act_val = self.next()
-
-                # Opcionalmente consumir ';'
+        # form 3: if condition then ... end
+        if tok.type == TokenType.KEYWORD and tok.value == 'if':
+            self.next()  # consume if
+            cond = self.parse_condition()
+            # optionally accept 'then'
+            if self.peek().type == TokenType.KEYWORD and self.peek().value == 'then':
+                self.next()
+            # body: one or more statements until 'end'
+            body = []
+            while not (self.peek().type == TokenType.KEYWORD and self.peek().value == 'end'):
+                if self.peek().type == TokenType.EOF:
+                    raise ParseError("if sem 'end'")
+                stmt = self.parse_statement()
+                if stmt: body.append(stmt)
+                # optional semicolon
                 if self.peek().type == TokenType.SEMICOLON:
                     self.next()
-
-                # Confere se termina com 'end'
-                end_tok = self.next()
-                if end_tok.value != "end":
-                    raise Exception(f"Erro de parsing: 'end' esperado em L{end_tok.line}")
-
-                ast_nodes.append({
-                    "type": "condition",
-                    "condition": {
-                        "left": left_tok.value,
-                        "op": op_tok.value,
-                        "right": right_tok.value
-                    },
-                    "action": {
-                        "type": "assignment",
-                        "name": act_name.value,
-                        "value": act_val.value
-                    }
-                })
-                continue
-
-            # ----------------------------------------------------
-            # Se não reconheceu nada, consome e segue
-            # ----------------------------------------------------
+            # consume 'end'
             self.next()
+            return ASTNode("if", {"condition": cond, "body": body})
 
-        return ast_nodes
+        # fallback: if token is a standalone route/action/... try to be tolerant
+        # If not recognized, skip token to avoid infinite loop
+        # But return None to signal nothing parsed
+        # Advance one token and continue
+        self.next()
+        return None
 
+    def parse_condition(self):
+        # parse simple_condition: sensor OP value
+        left_tok = self.next()
+        if left_tok.type not in (TokenType.IDENT, TokenType.KEYWORD) or left_tok.value not in self.sensors:
+            raise ParseError(f"Esperado sensor na condição, encontrado {left_tok}")
+        op_tok = self.next()
+        if op_tok.type != TokenType.OP:
+            raise ParseError(f"Esperado operador relacional em {op_tok}")
+        right_tok = self.next()
+        if right_tok.type not in (TokenType.NUMBER, TokenType.BOOLEAN, TokenType.IDENT, TokenType.KEYWORD):
+            raise ParseError(f"Esperado valor (NUMBER/BOOLEAN) em {right_tok}")
+        # for simplicity we don't implement full logical chaining (AND/OR) here,
+        # but parser returns a structure that CodeGen/Simulator can use.
+        return {"left": left_tok.value, "op": op_tok.value, "right": right_tok.value}
 
-# =========================================================
-# SEMÂNTICA / TABELA DE SÍMBOLOS
-# =========================================================
-class Symbol:
-    def __init__(self, name, typ, value=None):
-        self.name = name
-        self.type = typ
-        self.value = value
-
-    def __repr__(self):
-        return f"{self.name}: {self.type} = {self.value}"
-
-
-class SymbolTable:
-    def __init__(self):
-        self.symbols: Dict[str, Symbol] = {}
-
-    def define(self, name, typ):
-        if name in self.symbols:
-            raise Exception(f"Erro semântico: '{name}' já declarado.")
-        self.symbols[name] = Symbol(name, typ)
-
-    def lookup(self, name):
-        return self.symbols.get(name)
-
-    def assign(self, name, value):
-        sym = self.lookup(name)
-        if not sym:
-            raise Exception(f"Erro semântico: variável '{name}' não declarada.")
-        sym.value = value
-
-
+# =========================
+# SEMÂNTICA / VALIDAÇÕES
+# =========================
 class SemanticAnalyzer:
     def __init__(self):
-        self.table = SymbolTable()
+        # allowed vocabulary (same as before)
+        self.semaforo_ids = {"sem_quadra", "sem_av_principal", "sem_hospital"}
+        self.actions = {"abrir", "fechar", "intermitente"}
+        self.rotas = {"rota_emergencial", "rota_escolar", "rota_publica"}
+        self.priorities = {"alta", "media", "baixa"}
+        self.sensors = {"fluxo", "acidente", "emergencia"}
         self.errors: List[str] = []
 
-    def analyze(self, ast: List[Dict[str, Any]]):
+    def analyze(self, ast: List[ASTNode]) -> List[str]:
+        self.errors = []
         for node in ast:
-            try:
-                if node["type"] == "declaration":
-                    self.table.define(node["name"], node["symbol_type"])
-                elif node["type"] == "assignment":
-                    if not self.table.lookup(node["name"]):
-                        raise Exception(f"Variável '{node['name']}' não declarada.")
-                    self.table.assign(node["name"], node["value"])
-                elif node["type"] == "condition":
-                    cond = node["condition"]
-                    left = cond["left"]
-                    if self.table.lookup(left) is None:
-                        raise Exception(f"Identificador '{left}' na condição não declarado.")
-                    act = node["action"]
-                    if not self.table.lookup(act["name"]):
-                        raise Exception(f"Variável '{act['name']}' não declarada na ação.")
-            except Exception as e:
-                self.errors.append(str(e))
+            if node.nodetype == "semaforo_action":
+                sem = node.value["semaforo"]
+                act = node.value["action"]
+                if sem not in self.semaforo_ids:
+                    self.errors.append(f"Semáforo inválido: {sem}")
+                if act not in self.actions:
+                    self.errors.append(f"Ação inválida: {act}")
+            elif node.nodetype == "route_priority":
+                pr = node.value["priority"]
+                rota = node.value["rota"]
+                cond = node.value["condition"]
+                if pr not in self.priorities:
+                    self.errors.append(f"Prioridade inválida: {pr}")
+                if rota not in self.rotas:
+                    self.errors.append(f"Rota inválida: {rota}")
+                if cond["left"] not in self.sensors:
+                    self.errors.append(f"Sensor inválido na condição: {cond['left']}")
+            elif node.nodetype == "if":
+                cond = node.value["condition"]
+                if cond["left"] not in self.sensors:
+                    self.errors.append(f"Sensor inválido na condição do if: {cond['left']}")
+                # analyze body recursively
+                self.analyze(node.value["body"])
         return self.errors
 
-
-# =========================================================
+# =========================
 # GERAÇÃO DE CÓDIGO INTERMEDIÁRIO (IR)
-# =========================================================
+# =========================
 class CodeGenerator:
-    def generate(self, ast: List[Dict[str, Any]]):
+    def generate(self, ast: List[ASTNode]) -> List[Dict[str, Any]]:
         ir = []
-        for n in ast:
-            if n["type"] == "declaration":
-                ir.append({"op": "declare", "name": n["name"], "entity": n["symbol_type"]})
-            elif n["type"] == "assignment":
-                ir.append({"op": "assign", "target": n["name"], "value": n["value"]})
-            elif n["type"] == "condition":
+        for node in ast:
+            if node.nodetype == "semaforo_action":
+                ir.append({
+                    "op": "semaforo_action",
+                    "semaforo": node.value["semaforo"],
+                    "action": node.value["action"]
+                })
+            elif node.nodetype == "route_priority":
+                ir.append({
+                    "op": "route_priority",
+                    "priority": node.value["priority"],
+                    "rota": node.value["rota"],
+                    "condition": node.value["condition"]
+                })
+            elif node.nodetype == "if":
+                # nested body is also converted
+                sub_ir = self.generate(node.value["body"])
                 ir.append({
                     "op": "if",
-                    "cond": n["condition"],
-                    "action": n["action"]
+                    "condition": node.value["condition"],
+                    "body": sub_ir
                 })
         return ir
 
-
-# =========================================================
-# SIMULAÇÃO
-# =========================================================
+# =========================
+# SIMULADOR / EXECUÇÃO
+# =========================
 class Simulator:
-    def __init__(self, symtab: SymbolTable):
-        self.state = {}
-        self.table = symtab
+    def __init__(self, sensor_env: Dict[str, Any] = None):
+        # initial state: semaphores & routes
+        self.semaphores: Dict[str, str] = {}   # e.g. {'sem_quadra': 'fechado'}
+        self.routes: Dict[str, str] = {}       # e.g. {'rota_emergencial': 'normal' or 'prioridade_alta'}
+        self.sensor_env = sensor_env or {}
 
-    def run(self, ir: List[Dict[str, Any]]):
+    def eval_condition(self, cond: Dict[str, Any]) -> bool:
+        left = cond["left"]
+        op = cond["op"]
+        right = cond["right"]
+
+        lval = self.sensor_env.get(left, None)
+        # right may be identifier (sensor) or literal
+        if isinstance(right, str) and right in self.sensor_env:
+            rval = self.sensor_env[right]
+        else:
+            # try number
+            try:
+                if isinstance(right, str) and re.match(r'^\d+(\.\d+)?$', right):
+                    rval = float(right) if '.' in right else int(right)
+                elif isinstance(right, str) and right.lower() in ('true', 'false'):
+                    rval = True if right.lower() == 'true' else False
+                else:
+                    # fallback: raw string
+                    rval = right
+            except:
+                rval = right
+
+        # If sensor not present, default zero/False
+        if lval is None:
+            lval = 0
+        try:
+            expr = f"{repr(lval)} {op} {repr(rval)}"
+            return bool(eval(expr))
+        except Exception:
+            # safe fallback: equality by str
+            if op == '==' :
+                return str(lval) == str(rval)
+            return False
+
+    def run_ir(self, ir: List[Dict[str, Any]]):
         print("\n--- Simulação ---")
         for instr in ir:
-            if instr["op"] == "declare":
-                self.state[instr["name"]] = None
-                print(f"Declarado {instr['entity']} '{instr['name']}'")
-            elif instr["op"] == "assign":
-                self.state[instr["target"]] = instr["value"]
-                print(f"{instr['target']} <- {instr['value']}")
-            elif instr["op"] == "if":
-                cond = instr["cond"]
-                l = self.state.get(cond["left"], 0)
-                r = cond["right"]
-                if isinstance(r, str) and r in self.state:
-                    r = self.state[r]
-                result = eval(f"{l} {cond['op']} {r}")
-                print(f"if {cond['left']} {cond['op']} {cond['right']} -> {result}")
-                if result:
-                    act = instr["action"]
-                    self.state[act["name"]] = act["value"]
-                    print(f"Ação: {act['name']} <- {act['value']}")
-        print("Estado final:", self.state)
+            op = instr["op"]
+            if op == "semaforo_action":
+                sem = instr["semaforo"]
+                act = instr["action"]
+                self.semaphores[sem] = act
+                print(f"Semáforo '{sem}' -> {act}")
+            elif op == "route_priority":
+                cond = instr["condition"]
+                cond_res = self.eval_condition(cond)
+                print(f"Cond: {cond['left']} {cond['op']} {cond['right']} -> {cond_res}")
+                if cond_res:
+                    key = instr["rota"]
+                    self.routes[key] = f"prioridade_{instr['priority']}"
+                    print(f"Rota '{key}' setada como prioridade {instr['priority']}")
+            elif op == "if":
+                cond = instr["condition"]
+                if self.eval_condition(cond):
+                    print(f"IF true: executando corpo ({len(instr['body'])} instruções)")
+                    # execute body (recursive)
+                    self.run_ir(instr["body"])
+                else:
+                    print("IF false: pulando corpo")
+        print("Estado final semáforos:", self.semaphores)
+        print("Estado final rotas:", self.routes)
+        print("Sensores (ambiente):", self.sensor_env)
 
+# =========================
+# EXEMPLOS (baseados no PDF)
+# =========================
+EX1 = """
+# Exemplo 1: semáforo - abre um semáforo (exemplo simples do PDF).
+sem_quadra abrir;
+"""
 
-# =========================================================
-# EXEMPLOS
-# =========================================================
-def run_example(src, title):
-    print(f"\n\n==== {title} ====\n")
+EX2 = """
+# Exemplo 2: prioridade de rota condicional (fluxo > 10) - baseado na gramática do PDF.
+alta rota_emergencial fluxo > 10;
+"""
+
+EX3 = """
+# Exemplo 3: if com ação dentro (usar sensor emergencia)
+if emergencia == true then
+    sem_hospital intermitente;
+end
+"""
+
+def compile_and_run(src: str, sensor_env: Dict[str, Any] = None, title: str = "Programa"):
+    print("\n\n====", title, "====\n")
     print(src)
     lexer = Lexer(src)
     tokens = lexer.tokenize()
+    # debug printing tokens
+    # print("Tokens:", tokens)
     parser = Parser(tokens)
-    ast = parser.parse()
+    try:
+        ast = parser.parse_program()
+    except ParseError as e:
+        print("Erro de parsing:", e)
+        return
+    print("\nAST:")
+    for n in ast:
+        print(n)
     sem = SemanticAnalyzer()
     errors = sem.analyze(ast)
     if errors:
-        print("Erros semânticos:")
+        print("\nErros semânticos detectados:")
         for e in errors:
             print("-", e)
-    else:
-        gen = CodeGenerator()
-        ir = gen.generate(ast)
-        print("IR:", json.dumps(ir, indent=2, ensure_ascii=False))
-        sim = Simulator(sem.table)
-        sim.run(ir)
-
+        return
+    gen = CodeGenerator()
+    ir = gen.generate(ast)
+    print("\nIR (JSON):")
+    print(json.dumps(ir, indent=2, ensure_ascii=False))
+    sim = Simulator(sensor_env)
+    sim.run_ir(ir)
 
 if __name__ == "__main__":
-    # Exemplo 1
-    run_example("\n    sensor sensor1;\n    semaforo semA;\n    sensor1 = 5;\n    semA = 1;\n ", "Exemplo 1 - Declarações e atribuições\"")
+    # Observação: os exemplos e tokens usados foram baseados no PDF do projeto (vocabulário e exemplos).
+    # Veja: Compiladores Projeto.pdf (definição de semaforo_id, action, rota, condition e exemplos). :contentReference[oaicite:1]{index=1}
 
-    # Exemplo 2
-    run_example("n    sensor sensA;\n    rota R1;\n    sensA = 12;\n    if sensA > 10 then R1 = 1 end\n ", "Exemplo 2 - Condição\" ")
+    # Executar Exemplo 1
+    compile_and_run(EX1, sensor_env={"fluxo": 5}, title="Exemplo 1 - Semáforo")
 
-    # Exemplo 3 (com comentário e erro semântico)
-    run_example("\n    semaforo S1;\n    S2 = 1;  # S2 não declarado -> erro\n ", "Exemplo 3 - Erro semântico\" ")
+    # Executar Exemplo 2 (condição true usando fluxo=12)
+    compile_and_run(EX2, sensor_env={"fluxo": 12}, title="Exemplo 2 - Prioridade de Rota (fluxo=12)")
+
+    # Executar Exemplo 2 com fluxo baixo (não dispara)
+    compile_and_run(EX2, sensor_env={"fluxo": 3}, title="Exemplo 2b - Prioridade de Rota (fluxo=3)")
+
+    # Executar Exemplo 3 (if)
+    compile_and_run(EX3, sensor_env={"emergencia": True}, title="Exemplo 3 - If com semáforo (emergencia True)")
