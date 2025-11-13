@@ -1,0 +1,36 @@
+[
+  {
+    "op": "set",
+    "name": "emergencia",
+    "expr": {
+      "type": "bool",
+      "value": true
+    }
+  },
+  {
+    "op": "if",
+    "condition": {
+      "type": "cmp",
+      "op": "==",
+      "left": {
+        "type": "var",
+        "name": "emergencia"
+      },
+      "right": {
+        "type": "bool",
+        "value": true
+      }
+    },
+    "body": [
+      {
+        "op": "semaforo_action",
+        "semaforo": "sem_hospital",
+        "action": "intermitente"
+      },
+      {
+        "op": "command",
+        "name": "MOVE"
+      }
+    ]
+  }
+]
